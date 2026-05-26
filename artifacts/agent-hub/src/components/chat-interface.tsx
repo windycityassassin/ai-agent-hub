@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Link } from "wouter";
 import { useCreateAnthropicConversation, useListAnthropicMessages, getListAnthropicMessagesQueryKey, getGetRecentConversationsQueryKey, getGetAgentStatsQueryKey, getListAnthropicConversationsQueryKey, useSendAnthropicMessage } from "@workspace/api-client-react";
+import { DEMO_MODE, appendDemoMessage, streamDemoReply } from "@workspace/api-client-react/demo-data";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,41 +74,55 @@ export function ChatInterface({ agentType, welcomeMessage }: ChatInterfaceProps)
       }
 
       // Optimistically add user message if we wanted to, but we'll rely on the server refresh
-      
-      const response = await fetch(`/api/anthropic/conversations/${currentId}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: userMessage }),
-      });
-      
-      if (!response.ok) {
-        throw new Error("Failed to send message");
-      }
-      
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let assistantContent = '';
-      
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.done) break;
-              if (data.content) {
-                assistantContent += data.content;
-                setStreamingContent(assistantContent);
-              }
-            } catch {}
+
+      if (DEMO_MODE) {
+        // Persist the user message into the in-memory store so the next
+        // list-messages refresh shows it, then fake the assistant stream.
+        appendDemoMessage(currentId, "user", userMessage);
+        const { reply, chunks } = streamDemoReply(agentType, userMessage);
+        let assistantContent = "";
+        for (const chunk of chunks) {
+          await new Promise((r) => setTimeout(r, 25));
+          assistantContent += chunk;
+          setStreamingContent(assistantContent);
+        }
+        appendDemoMessage(currentId, "assistant", reply);
+      } else {
+        const response = await fetch(`/api/anthropic/conversations/${currentId}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: userMessage }),
+        });
+
+        if (!response.ok) {
+          throw new Error("Failed to send message");
+        }
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let assistantContent = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.done) break;
+                if (data.content) {
+                  assistantContent += data.content;
+                  setStreamingContent(assistantContent);
+                }
+              } catch {}
+            }
           }
         }
       }
-      
-      // Refresh messages after stream
+
+      // Refresh messages after stream (demo or real)
       await queryClient.invalidateQueries({ queryKey: getListAnthropicMessagesQueryKey(currentId) });
       
     } catch (err) {

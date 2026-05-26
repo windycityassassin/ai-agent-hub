@@ -1,6 +1,48 @@
+import { DEMO_MODE, resolveDemoResponse } from "./demo-data";
+
 export type CustomFetchOptions = RequestInit & {
   responseType?: "json" | "text" | "blob" | "auto";
 };
+
+const UNHANDLED = Symbol("demo-unhandled");
+
+async function tryDemoResolve<T>(
+  input: RequestInfo | URL,
+  method: string,
+  body: BodyInit | null | undefined,
+): Promise<T | typeof UNHANDLED> {
+  const raw = resolveUrl(input);
+  // resolveUrl gives us absolute or relative; parse both safely.
+  const u = raw.startsWith("http")
+    ? new URL(raw)
+    : new URL(raw, "http://demo.local");
+
+  let parsedBody: unknown = undefined;
+  if (typeof body === "string") {
+    try {
+      parsedBody = JSON.parse(body);
+    } catch {
+      parsedBody = body;
+    }
+  }
+
+  const match = resolveDemoResponse(u.pathname, u.searchParams, method, parsedBody);
+  if (!match) return UNHANDLED;
+
+  // Mimic React Query's awaited result. The codegen calls customFetch<T>()
+  // and types its responses as the JSON payload; for 204 we return null cast.
+  if (match.status >= 200 && match.status < 300) {
+    return match.body as T;
+  }
+
+  // Error path: build a minimal Response so ApiError shape stays the same.
+  const errResponse = new Response(JSON.stringify(match.body), {
+    status: match.status,
+    statusText: match.status === 404 ? "Not Found" : "Error",
+    headers: { "content-type": "application/json" },
+  });
+  throw new ApiError(errResponse, match.body, { method, url: raw });
+}
 
 export type ErrorType<T = unknown> = ApiError<T>;
 
@@ -333,6 +375,15 @@ export async function customFetch<T = unknown>(
 
   if (init.body != null && (method === "GET" || method === "HEAD")) {
     throw new TypeError(`customFetch: ${method} requests cannot have a body.`);
+  }
+
+  // Demo mode: short-circuit /api/* calls with canned data so the gh-pages
+  // bundle is browsable without a real backend. See demo-data.ts.
+  if (DEMO_MODE) {
+    const demoResult = await tryDemoResolve<T>(input, method, init.body);
+    if (demoResult !== UNHANDLED) {
+      return demoResult;
+    }
   }
 
   const headers = mergeHeaders(isRequest(input) ? input.headers : undefined, headersInit);
